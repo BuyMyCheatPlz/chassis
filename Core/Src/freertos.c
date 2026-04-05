@@ -178,7 +178,7 @@ void StartTask02(void *argument)
 {
   /* USER CODE BEGIN StartTask02 */
   PIDVelocityConfig_t pidConfig[PID_VELOCITY_COUNT];
-  PIDVelocity_GetDefaultConfig(pidConfig);
+  PIDVelocity_GetDefaultConfig(pidConfig);task02
   PIDVelocity_Init(pidConfig);
   PIDVelocity_ResetAll();
 

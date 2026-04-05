@@ -20,6 +20,25 @@
 #include "pid_velocity.h"
 
 #define PID_VELOCITY_MAX_COUNT  4U
+#define PID_VELOCITY_ENCODER_QUADRATURE_FACTOR  4L
+#define PID_VELOCITY_REF_LINE_COUNT             12L
+#define PID_VELOCITY_REF_GEAR_RATIO             500L
+
+static int32_t PIDVelocity_GetCountsPerOutputRev(const PIDVelocityConfig_t *config)
+{
+	int32_t line_count;
+	int32_t gear_ratio;
+
+	if (config == NULL)
+	{
+		return 1;
+	}
+
+	line_count = (config->encoder_line_count > 0U) ? (int32_t)config->encoder_line_count : 1;
+	gear_ratio = (config->gear_ratio > 0U) ? (int32_t)config->gear_ratio : 1;
+
+	return line_count * PID_VELOCITY_ENCODER_QUADRATURE_FACTOR * gear_ratio;
+}
 
 typedef struct
 {
@@ -65,6 +84,8 @@ void PIDVelocity_GetDefaultConfig(PIDVelocityConfig_t config[PID_VELOCITY_COUNT]
 
 	config[PID_VELOCITY_ID_1].encoder_id = ENCODER_ID_1;
 	config[PID_VELOCITY_ID_1].motor_id = MOTOR_ID_1;
+	config[PID_VELOCITY_ID_1].encoder_line_count = 12U;
+	config[PID_VELOCITY_ID_1].gear_ratio = 500U;
 	config[PID_VELOCITY_ID_1].kp = 0.40f;
 	config[PID_VELOCITY_ID_1].ki = 0.03f;
 	config[PID_VELOCITY_ID_1].kd = 0.00f;
@@ -221,6 +242,10 @@ void PIDVelocity_RunStep(void)
 		PIDVelocityChannel_t *channel = &s_channels[i];
 		const PIDVelocityConfig_t *config = &channel->config;
 		PIDVelocityState_t *state = &channel->state;
+		const int32_t ref_counts_per_rev = PID_VELOCITY_REF_LINE_COUNT
+									 * PID_VELOCITY_ENCODER_QUADRATURE_FACTOR
+									 * PID_VELOCITY_REF_GEAR_RATIO;
+		int32_t counts_per_rev;
 
 		int32_t delta_count = Encoder_GetDelta(config->encoder_id);
 
@@ -238,6 +263,16 @@ void PIDVelocity_RunStep(void)
 		}
 
 		state->measured_speed_cps = (int32_t)((delta_count * 1000L) / (int32_t)config->sample_time_ms);
+		counts_per_rev = PIDVelocity_GetCountsPerOutputRev(config);
+
+		/*
+		 * Normalize measured speed to a 12-line, 500-ratio reference drivetrain,
+		 * so existing PID gains/max_speed_cps tuning remains comparable.
+		 */
+		if (counts_per_rev > 0)
+		{
+			state->measured_speed_cps = (state->measured_speed_cps * ref_counts_per_rev) / counts_per_rev;
+		}
 
 		float error = (float)(state->target_speed_cps - state->measured_speed_cps);
 		float dt = (float)config->sample_time_ms / 1000.0f;

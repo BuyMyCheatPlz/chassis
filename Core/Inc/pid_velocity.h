@@ -42,6 +42,8 @@ typedef struct
 {
 	EncoderId_t encoder_id;
 	MotorId_t motor_id;
+	uint16_t encoder_line_count;
+	uint16_t gear_ratio;
 	float kp;
 	float ki;
 	float kd;

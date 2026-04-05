@@ -62,7 +62,7 @@ void MX_USART1_UART_Init(void)
 
   /* USER CODE END USART1_Init 1 */
   huart1.Instance = USART1;
-  huart1.Init.BaudRate = 115200;
+  huart1.Init.BaudRate = 9600;
   huart1.Init.WordLength = UART_WORDLENGTH_8B;
   huart1.Init.StopBits = UART_STOPBITS_1;
   huart1.Init.Parity = UART_PARITY_NONE;
@@ -276,7 +276,7 @@ static void USART1_RxRestart(void)
 
 static void USART1_ProcessFrame(const uint8_t *buffer, uint16_t length)
 {
-  char frame[USART1_RX_BUFFER_SIZE + 1U];
+  char frame[USART1_RX_BUFFER_SIZE + 1U] = {0};
   char *lx_command;
   char *rx_command;
   long lx = 0;
