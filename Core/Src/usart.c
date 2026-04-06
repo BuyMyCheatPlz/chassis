@@ -25,6 +25,7 @@
 #include "cmsis_os.h"
 #include "pid_velocity.h"
 
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -32,11 +33,20 @@
 #define USART1_RX_BUFFER_SIZE  64U
 
 static uint8_t s_usart1_rx_buffer[USART1_RX_BUFFER_SIZE];
+static uint8_t s_usart1_pending_buffer[USART1_RX_BUFFER_SIZE];
+static volatile uint16_t s_usart1_pending_length = 0U;
+static volatile uint8_t s_usart1_pending_ready = 0U;
 
 static void USART1_RxRestart(void);
+static void USART1_StorePendingFrame(const uint8_t *buffer, uint16_t length);
 static void USART1_ProcessFrame(const uint8_t *buffer, uint16_t length);
 static void USART1_QueueText(const char *text);
 static void USART1_ExtractAndQueueForwardFrames(const char *frame);
+static uint8_t USART1_ParseAngleSpeedDeviceId(const char *cursor,
+                                              float *angle,
+                                              long *speed,
+                                              long *device_id,
+                                              int *consumed);
 
 void USART1_IdleReceiveIRQHandler(void);
 
@@ -274,6 +284,23 @@ static void USART1_RxRestart(void)
   __HAL_UART_ENABLE_IT(&huart1, UART_IT_IDLE);
 }
 
+static void USART1_StorePendingFrame(const uint8_t *buffer, uint16_t length)
+{
+  if ((buffer == NULL) || (length == 0U))
+  {
+    return;
+  }
+
+  if (length > USART1_RX_BUFFER_SIZE)
+  {
+    length = USART1_RX_BUFFER_SIZE;
+  }
+
+  memcpy(s_usart1_pending_buffer, buffer, length);
+  s_usart1_pending_length = length;
+  s_usart1_pending_ready = 1U;
+}
+
 static void USART1_ProcessFrame(const uint8_t *buffer, uint16_t length)
 {
   char frame[USART1_RX_BUFFER_SIZE + 1U] = {0};
@@ -298,8 +325,6 @@ static void USART1_ProcessFrame(const uint8_t *buffer, uint16_t length)
 
   memcpy(frame, buffer, length);
   frame[length] = '\0';
-
-  USART1_ExtractAndQueueForwardFrames(frame);
 
   lx_command = strstr(frame, "LX");
   if (lx_command != NULL)
@@ -347,6 +372,15 @@ static void USART1_ProcessFrame(const uint8_t *buffer, uint16_t length)
     PIDVelocity_SetChassisCommand(0, 0, (int32_t)rx);
     return;
   }
+
+  /* If not a mecanum command, forward raw frame to USART2. */
+  {
+    size_t frame_len = strnlen(frame, sizeof(frame) - 1U);
+    if (frame_len > 0U)
+    {
+      USART1_QueueText(frame);
+    }
+  }
 }
 
 static void USART1_QueueText(const char *text)
@@ -366,98 +400,95 @@ static void USART1_QueueText(const char *text)
   (void)osMessageQueuePut(Usart_SendingHandle, &message, 0U, 0U);
 }
 
+static uint8_t USART1_ParseAngleSpeedDeviceId(const char *cursor,
+                                              float *angle,
+                                              long *speed,
+                                              long *device_id,
+                                              int *consumed)
+{
+  char *endptr;
+  const char *speed_pos;
+  const char *id_pos;
+  const char *value_pos;
+
+  if ((cursor == NULL) || (angle == NULL) || (speed == NULL) || (device_id == NULL) || (consumed == NULL))
+  {
+    return 0U;
+  }
+
+  endptr = NULL;
+  *angle = strtof(cursor + 6, &endptr);
+  if ((endptr == (cursor + 6)) || (endptr == NULL))
+  {
+    return 0U;
+  }
+
+  speed_pos = strstr(endptr, "Speed");
+  if (speed_pos == NULL)
+  {
+    speed_pos = strstr(endptr, "SPEED");
+  }
+  if (speed_pos == NULL)
+  {
+    speed_pos = strstr(endptr, "speed");
+  }
+  if (speed_pos == NULL)
+  {
+    return 0U;
+  }
+
+  value_pos = speed_pos + 5;
+  while ((*value_pos != '\0') && ((*value_pos == ':') || (*value_pos == '=') || (*value_pos == ',') || isspace((unsigned char)*value_pos)))
+  {
+    value_pos++;
+  }
+
+  endptr = NULL;
+  *speed = strtol(value_pos, &endptr, 10);
+  if ((endptr == value_pos) || (endptr == NULL))
+  {
+    return 0U;
+  }
+
+  id_pos = strstr(endptr, "Device_Id");
+  if (id_pos == NULL)
+  {
+    id_pos = strstr(endptr, "Device_ID");
+  }
+  if (id_pos == NULL)
+  {
+    id_pos = strstr(endptr, "DeviceId");
+  }
+  if (id_pos == NULL)
+  {
+    return 0U;
+  }
+
+  value_pos = id_pos;
+  while ((*value_pos != '\0') && (*value_pos != ':') && (*value_pos != '=') && !isspace((unsigned char)*value_pos))
+  {
+    value_pos++;
+  }
+  while ((*value_pos != '\0') && ((*value_pos == ':') || (*value_pos == '=') || (*value_pos == ',') || isspace((unsigned char)*value_pos)))
+  {
+    value_pos++;
+  }
+
+  endptr = NULL;
+  *device_id = strtol(value_pos, &endptr, 10);
+  if ((endptr == value_pos) || (endptr == NULL))
+  {
+    return 0U;
+  }
+
+  *consumed = (int)(endptr - cursor);
+  return 1U;
+}
+
 static void USART1_ExtractAndQueueForwardFrames(const char *frame)
 {
-  const char *cursor;
-  float angle = 0.0f;
-  long speed = 0;
-  long device_id = 0;
-  long cmd_device_id = 0;
-  int consumed = 0;
-  char out_text[96];
-
-  if (frame == NULL)
-  {
-    return;
-  }
-
-  cursor = frame;
-  while ((cursor = strstr(cursor, "Angle:")) != NULL)
-  {
-    consumed = 0;
-    if (sscanf(cursor, "Angle:%f Speed:%ld Device_Id:%ld%n", &angle, &speed, &device_id, &consumed) == 3)
-    {
-      int len = snprintf(out_text,
-                         sizeof(out_text),
-                         "Angle:%0.3f Speed:%ld Device_Id:%ld\r\n",
-                         (double)angle,
-                         speed,
-                         device_id);
-
-      if ((len > 0) && ((size_t)len < sizeof(out_text)))
-      {
-        USART1_QueueText(out_text);
-      }
-
-      cursor += (consumed > 0) ? consumed : 1;
-      continue;
-    }
-
-    consumed = 0;
-    if (sscanf(cursor, "Angle:%f Speed%ld Device_Id:%ld%n", &angle, &speed, &device_id, &consumed) == 3)
-    {
-      int len = snprintf(out_text,
-                         sizeof(out_text),
-                         "Angle:%0.3f Speed:%ld Device_Id:%ld\r\n",
-                         (double)angle,
-                         speed,
-                         device_id);
-
-      if ((len > 0) && ((size_t)len < sizeof(out_text)))
-      {
-        USART1_QueueText(out_text);
-      }
-
-      cursor += (consumed > 0) ? consumed : 1;
-      continue;
-    }
-
-    cursor += 6;
-  }
-
-  cursor = frame;
-  while ((cursor = strstr(cursor, "Device_Id:")) != NULL)
-  {
-    consumed = 0;
-    if (sscanf(cursor, "Device_Id:%ld Start%n", &cmd_device_id, &consumed) == 1)
-    {
-      int len = snprintf(out_text, sizeof(out_text), "Device_Id:%ld Start\r\n", cmd_device_id);
-
-      if ((len > 0) && ((size_t)len < sizeof(out_text)))
-      {
-        USART1_QueueText(out_text);
-      }
-
-      cursor += (consumed > 0) ? consumed : 1;
-      continue;
-    }
-
-    consumed = 0;
-    if (sscanf(cursor, "Device_Id:%ld Stop%n", &cmd_device_id, &consumed) == 1)
-    {
-      int len = snprintf(out_text, sizeof(out_text), "Device_Id:%ld Stop\r\n", cmd_device_id);
-
-      if ((len > 0) && ((size_t)len < sizeof(out_text)))
-      {
-        USART1_QueueText(out_text);
-      }
-
-      cursor += (consumed > 0) ? consumed : 1;
-      continue;
-    }
-
-    cursor += 10;
-  }
+  /* Placeholder: forwarding logic moved to USART1_ProcessFrame. */
+  (void)frame;
 }
 
 void USART1_IdleReceiveIRQHandler(void)
@@ -473,7 +504,7 @@ void USART1_IdleReceiveIRQHandler(void)
   HAL_UART_DMAStop(&huart1);
 
   received_length = (uint16_t)(USART1_RX_BUFFER_SIZE - __HAL_DMA_GET_COUNTER(huart1.hdmarx));
-  USART1_ProcessFrame(s_usart1_rx_buffer, received_length);
+  USART1_StorePendingFrame(s_usart1_rx_buffer, received_length);
   USART1_RxRestart();
 }
 
@@ -481,8 +512,44 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
   if (huart->Instance == USART1)
   {
-    USART1_ProcessFrame(s_usart1_rx_buffer, USART1_RX_BUFFER_SIZE);
+    USART1_StorePendingFrame(s_usart1_rx_buffer, USART1_RX_BUFFER_SIZE);
     USART1_RxRestart();
+  }
+}
+
+void USART1_PollAndProcessPendingFrame(void)
+{
+  uint16_t pending_length;
+  uint8_t local_buffer[USART1_RX_BUFFER_SIZE];
+
+  if (s_usart1_pending_ready == 0U)
+  {
+    return;
+  }
+
+  __disable_irq();
+  if (s_usart1_pending_ready == 0U)
+  {
+    __enable_irq();
+    return;
+  }
+
+  pending_length = s_usart1_pending_length;
+  if (pending_length > USART1_RX_BUFFER_SIZE)
+  {
+    pending_length = USART1_RX_BUFFER_SIZE;
+  }
+
+  if (pending_length > 0U)
+  {
+    memcpy(local_buffer, s_usart1_pending_buffer, pending_length);
+  }
+  s_usart1_pending_ready = 0U;
+  __enable_irq();
+
+  if (pending_length > 0U)
+  {
+    USART1_ProcessFrame(local_buffer, pending_length);
   }
 }
 

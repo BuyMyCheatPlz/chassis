@@ -121,9 +121,17 @@ void MX_FREERTOS_Init(void) {
   /* Create the queue(s) */
   /* creation of Motor_Running */
   Motor_RunningHandle = osMessageQueueNew (16, sizeof(uint16_t), &Motor_Running_attributes);
+  if (Motor_RunningHandle == NULL)
+  {
+    Error_Handler();
+  }
 
   /* creation of Usart_Sending */
   Usart_SendingHandle = osMessageQueueNew (16, sizeof(UsartCommandMessage_t), &Usart_Sending_attributes);
+  if (Usart_SendingHandle == NULL)
+  {
+    Error_Handler();
+  }
 
   /* USER CODE BEGIN RTOS_QUEUES */
   /* add queues, ... */
@@ -132,12 +140,24 @@ void MX_FREERTOS_Init(void) {
   /* Create the thread(s) */
   /* creation of defaultTask */
   defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
+  if (defaultTaskHandle == NULL)
+  {
+    Error_Handler();
+  }
 
   /* creation of Motor_Run */
   Motor_RunHandle = osThreadNew(StartTask02, NULL, &Motor_Run_attributes);
+  if (Motor_RunHandle == NULL)
+  {
+    Error_Handler();
+  }
 
   /* creation of Usart_Send */
   Usart_SendHandle = osThreadNew(StartTask03, NULL, &Usart_Send_attributes);
+  if (Usart_SendHandle == NULL)
+  {
+    Error_Handler();
+  }
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -162,6 +182,7 @@ void StartDefaultTask(void *argument)
   /* Infinite loop */
   for(;;)
   {
+    USART1_PollAndProcessPendingFrame();
     osDelay(1);
   }
   /* USER CODE END StartDefaultTask */
@@ -204,17 +225,28 @@ void StartTask03(void *argument)
 {
   /* USER CODE BEGIN StartTask03 */
   UsartCommandMessage_t rx_msg;
+  UsartCommandMessage_t latest_msg;
 
   /* Infinite loop */
   for(;;)
   {
     if (osMessageQueueGet(Usart_SendingHandle, &rx_msg, NULL, osWaitForever) == osOK)
     {
-      size_t tx_len = strnlen(rx_msg.text, sizeof(rx_msg.text));
+      size_t tx_len;
+
+      latest_msg = rx_msg;
+
+      /* Drop backlog and keep only the newest command for USART2 forwarding. */
+      while (osMessageQueueGet(Usart_SendingHandle, &rx_msg, NULL, 0U) == osOK)
+      {
+        latest_msg = rx_msg;
+      }
+
+      tx_len = strnlen(latest_msg.text, sizeof(latest_msg.text));
 
       if (tx_len > 0U)
       {
-        (void)HAL_UART_Transmit(&huart2, (uint8_t *)rx_msg.text, (uint16_t)tx_len, 100U);
+        (void)HAL_UART_Transmit(&huart2, (uint8_t *)latest_msg.text, (uint16_t)tx_len, 100U);
       }
     }
   }

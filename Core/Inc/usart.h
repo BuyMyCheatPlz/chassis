@@ -53,6 +53,7 @@ void MX_USART2_UART_Init(void);
 /* USER CODE BEGIN Prototypes */
 
 void USART1_IdleReceiveIRQHandler(void);
+void USART1_PollAndProcessPendingFrame(void);
 
 /* USER CODE END Prototypes */
 
